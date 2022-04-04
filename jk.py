@@ -6,6 +6,9 @@ Created on Thu Mar 31 13:53:29 2022
 @author: jekim
 """
 import os
+import sys 
+import cv2 as cv
+import time
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -16,13 +19,41 @@ import numpy as np
 import matplotlib.pyplot as plt
 from torch.utils.data import Dataset, DataLoader
 from torchvision import transforms, utils
+import torchvision.models as models
+
+def print_overwrite(step, total_step, loss, operation):
+    sys.stdout.write('\r')
+    if operation == 'train':
+        sys.stdout.write("Train Steps: %d/%d  Loss: %.4f " % (step, total_step, loss))   
+    else:
+        sys.stdout.write("Valid Steps: %d/%d  Loss: %.4f " % (step, total_step, loss))
+        
+    sys.stdout.flush()
+
+def show_landmarks_batch(sample_batched):
+    """Show image with landmarks for a batch of samples."""
+    images_batch, landmarks_batch = \
+            sample_batched['image'], sample_batched['landmarks']
+    batch_size = len(images_batch)
+    im_size = images_batch.size(2)
+    grid_border_size = 2
+
+    grid = utils.make_grid(images_batch)
+    plt.imshow(grid.numpy().transpose((1, 2, 0)))
+
+    for i in range(batch_size):
+        plt.scatter(landmarks_batch[i, :, 0].numpy() + i * im_size + (i + 1) * grid_border_size,
+                    landmarks_batch[i, :, 1].numpy() + grid_border_size,
+                    s=10, marker='.', c='r')
+
+        plt.title('Batch from dataloader')
+
 
 def show_landmarks(image, landmarks):
     """Show image with landmarks"""
     plt.imshow(image)
     plt.scatter(landmarks[:, 0], landmarks[:, 1], s=10, marker='.', c='r')
     plt.pause(0.001)  # pause a bit so that plots are updated
-
 
 class ClothLandmarksDataset(Dataset):
     """cloth Landmarks dataset."""
@@ -57,7 +88,11 @@ class ClothLandmarksDataset(Dataset):
         if self.transform:
             sample = self.transform(sample)
 
-        return sample
+        # return sample
+        image = sample['image']
+        landmarks = sample['landmarks']
+        
+        return image, landmarks
     
 class Rescale(object):
     """Rescale the image in a sample to a given size.
@@ -127,7 +162,15 @@ class RandomCrop(object):
 
         return {'image': image, 'landmarks': landmarks}
 
+class Normalize(object):
 
+    def __call__(self, sample):
+        image, landmarks = sample['image'], sample['landmarks']
+        
+        final_img = cv.normalize(image, None, 0, 255, cv.NORM_MINMAX)
+        
+        return {'image': image, 'landmarks': landmarks}
+    
 class ToTensor(object):
     """Convert ndarrays in sample to Tensors."""
 
@@ -141,36 +184,177 @@ class ToTensor(object):
         return {'image': torch.from_numpy(image),
                 'landmarks': torch.from_numpy(landmarks)}
     
+class Network(nn.Module):
+    def __init__(self,num_classes=34):
+        super().__init__()
+        self.model_name='resnet18'
+        self.model=models.resnet18()
+        self.model.conv1=nn.Conv2d(3, 64, kernel_size=7, stride=2, padding=3, bias=False)
+        self.model.fc=nn.Linear(self.model.fc.in_features, num_classes)
+        
+    def forward(self, x):
+        x=self.model(x)
+        return x
+    
+    
 if __name__ == "__main__":
     
-    '''prepare the dataset'''
-    
-    cloth_dataset = ClothLandmarksDataset(csv_file='data/sabok_220330_point.csv',
-                                           root_dir='data/images/',
-                                           transform=transforms.Compose([
-                                               Rescale(256),
-                                               RandomCrop(224),
-                                               ToTensor()
-                                           ]))
-    
-    
-    
-    dataloader = DataLoader(cloth_dataset, batch_size=4,
-                        shuffle=True, num_workers=0)
-    
-    fig = plt.figure()
+    '''prepare the dataset'''  
 
-    for i in range(len(cloth_dataset)):
-        sample = cloth_dataset[i]
+    'simple dataset'    
+    cloth_dataset = ClothLandmarksDataset(csv_file='data/cloth_landmark.csv',
+                                    root_dir='data/images/')
     
-        print(i, sample['image'].shape, sample['landmarks'].shape)
+    'dataset with tensor and transform'
     
-        ax = plt.subplot(1, 4, i + 1)
-        plt.tight_layout()
-        ax.set_title('Sample #{}'.format(i))
-        ax.axis('off')
-        show_landmarks(**sample)
+    data_transform = transforms.Compose([
+        # transforms.RandomResizedCrop(224),
+        # transforms.RandomHorizontalFlip(),
+        # transforms.ToTensor(),
+        Rescale(256),
+        RandomCrop(224),
+        Normalize(),
+        ToTensor()
+    ])
     
-        if i == 3:
-            plt.show()
-            break
+    cloth_dataset = ClothLandmarksDataset(csv_file='data/cloth_landmark.csv',
+                                            root_dir='data/images/',
+                                            transform=data_transform)
+    
+    # cloth_dataset = ClothLandmarksDataset(csv_file='data/cloth_landmark.csv',
+    #                                         root_dir='data/images/',
+    #                                         transform=transforms.Compose([
+    #                                             Rescale(256),
+    #                                             RandomCrop(224),
+    #                                             ToTensor()
+    #                                         ]))
+    
+    train_dataset,test_dataset=torch.utils.data.random_split(cloth_dataset,(31,10))
+    
+    train_loader = DataLoader(train_dataset, batch_size=4,shuffle=True, num_workers=0)
+    valid_loader = DataLoader(test_dataset, batch_size=4,shuffle=True, num_workers=0)
+    
+    device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+
+
+    ''' train '''
+    
+    network = Network()
+    network.cuda()
+    
+    criterion = nn.MSELoss()
+    optimizer = optim.Adam(network.parameters(), lr=0.0001)
+    
+    loss_min = np.inf
+    num_epochs = 10
+    
+    start_time = time.time()
+    for epoch in range(1,num_epochs+1):
+        
+        loss_train = 0
+        loss_valid = 0
+        running_loss = 0
+        
+        network.train()
+        for step in range(1,len(train_loader)+1):
+        
+            images, landmarks = next(iter(train_loader))
+            
+            images = images.float().cuda()
+
+            landmarks = landmarks.view(landmarks.size(0),-1).float().cuda() 
+            
+            predictions = network(images)
+            
+            # clear all the gradients before calculating them
+            optimizer.zero_grad()
+            
+            # find the loss for the current step
+            loss_train_step = criterion(predictions, landmarks)
+            
+            # calculate the gradients
+            loss_train_step.backward()
+            
+            # update the parameters
+            optimizer.step()
+            
+            loss_train += loss_train_step.item()
+            running_loss = loss_train/step
+            
+            print_overwrite(step, len(train_loader), running_loss, 'train')
+            
+        network.eval() 
+        with torch.no_grad():
+            
+            for step in range(1,len(valid_loader)+1):
+                
+                images, landmarks = next(iter(valid_loader))
+            
+                images = images.float().cuda()
+                landmarks = landmarks.view(landmarks.size(0),-1).float().cuda()
+            
+                predictions = network(images)
+    
+                # find the loss for the current step
+                loss_valid_step = criterion(predictions, landmarks)
+    
+                loss_valid += loss_valid_step.item()
+                running_loss = loss_valid/step
+    
+                print_overwrite(step, len(valid_loader), running_loss, 'valid')
+        
+        loss_train /= len(train_loader)
+        loss_valid /= len(valid_loader)
+        
+        print('\n--------------------------------------------------')
+        print('Epoch: {}  Train Loss: {:.4f}  Valid Loss: {:.4f}'.format(epoch, loss_train, loss_valid))
+        print('--------------------------------------------------')
+        
+        if loss_valid < loss_min:
+            loss_min = loss_valid
+            # torch.save(network.state_dict(), '/content/face_landmarks.pth') 
+            print("\nMinimum Validation Loss of {:.4f} at epoch {}/{}".format(loss_min, epoch, num_epochs))
+            print('Model Saved\n')
+         
+    print('Training Complete')
+    print("Total Elapsed Time : {} s".format(time.time()-start_time))
+        
+    # train(resnet18, params)
+    
+    '''visulization code'''
+    # fig = plt.figure()
+
+    # for i in range(len(cloth_dataset)):
+    #     sample = cloth_dataset[i]
+    
+    #     print(i, sample['image'].shape, sample['landmarks'].shape)
+    
+    #     ax = plt.subplot(1, 4, i + 1)
+    #     plt.tight_layout()
+    #     ax.set_title('Sample #{}'.format(i))
+    #     ax.axis('off')
+    #     show_landmarks(**sample)
+    
+    #     if i == 3:
+    #         plt.show()
+    #         break
+ 
+    # for i_batch, sample_batched in enumerate(dataloader_train):
+    #     # print(i_batch, sample_batched['image'].size(), sample_batched['landmarks'].size())
+    
+    #     # observe 4th batch and stop.
+    #     if i_batch == 3:
+    #         plt.figure()
+    #         show_landmarks_batch(sample_batched)
+    #         plt.axis('off')
+    #         plt.ioff()
+    #         plt.show()
+    #         break
+
+    # for i in range(train_dataset.__len__()):
+    #     # plt.imshow(np.transpose(train_dataset[i][0], (1,2,0)))
+    #     plt.imshow(train_dataset[i][0])
+    #     plt.show()
+    
+    # train_dataset[0]
+        
