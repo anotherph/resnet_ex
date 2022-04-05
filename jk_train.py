@@ -105,7 +105,6 @@ class Rescale(object):
 
         return {'image': img, 'landmarks': landmarks}
 
-
 class RandomCrop(object):
     """Crop randomly the image in a sample.
 
@@ -134,7 +133,7 @@ class RandomCrop(object):
         image = image[top: top + new_h,
                       left: left + new_w]
 
-        landmarks = landmarks - [left, top]
+        landmarks = landmarks - [left, top]    
 
         return {'image': image, 'landmarks': landmarks}
 
@@ -143,9 +142,25 @@ class Normalize(object):
     def __call__(self, sample):
         image, landmarks = sample['image'], sample['landmarks']
         
-        final_img = cv.normalize(image, None, 0, 255, cv.NORM_MINMAX)
+        # final_img = cv.normalize(image, None, 0, 255, cv.NORM_MINMAX)
         
-        return {'image': image, 'landmarks': landmarks}
+        '''calculate mean & var'''
+        transform = transforms.Compose([
+            transforms.ToTensor()
+            ])
+        img_tr = transform(image)
+        mean, std = img_tr.mean([1,2]), img_tr.std([1,2])
+        
+        '''normalize the image using mean & var'''
+        transform_norm = transforms.Compose([
+            transforms.ToTensor(),
+            transforms.Normalize(mean, std)
+            ])
+        
+        img_normalized = transform_norm(image)
+        img=np.array(img_normalized)
+        
+        return {'image': img.transpose(1,2,0), 'landmarks': landmarks}
     
 class ToTensor(object):
     """Convert ndarrays in sample to Tensors."""
@@ -156,7 +171,10 @@ class ToTensor(object):
         # swap color axis because
         # numpy image: H x W x C
         # torch image: C x H x W
+        
+        landmarks = landmarks / [image.shape[1], image.shape[0]]
         image = image.transpose((2, 0, 1))
+        
         return {'image': torch.from_numpy(image),
                 'landmarks': torch.from_numpy(landmarks)}
     
@@ -165,6 +183,7 @@ class Network(nn.Module):
         super().__init__()
         self.model_name='resnet18'
         self.model=models.resnet18(pretrained=True)
+        # self.model=models.resnet18()
         self.model.conv1=nn.Conv2d(3, 64, kernel_size=7, stride=2, padding=3, bias=False)
         self.model.fc=nn.Linear(self.model.fc.in_features, num_classes)
         
@@ -204,6 +223,7 @@ if __name__ == "__main__":
     
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
+    # cloth_dataset[0]
 
     ''' train '''
     
@@ -215,7 +235,7 @@ if __name__ == "__main__":
     optimizer = optim.Adam(network.parameters(), lr=0.0001)
     
     loss_min = np.inf
-    num_epochs = 1000
+    num_epochs = 50
     
     start_time = time.time()
     
@@ -241,12 +261,10 @@ if __name__ == "__main__":
             # temp=images.cpu().detach().numpy()
             # display_img=np.transpose(temp[0,:,:,:], (1,2,0))
             # temp=landmarks.cpu().detach().numpy()
-            # display_landmarks=temp[0,:].reshape(-1,2)
-            
-            # plt.imshow(display_img)
-            # for landmarks in display_landmarks:
-            #     plt.scatter(display_landmarks[:,0], display_landmarks[:,1], c = 'c', s = 5)
+            # display_landmarks=temp[0,:].reshape(-1,2)           
 
+            # plt.scatter(display_landmarks[:,0]*display_img.shape[0], display_landmarks[:,1]*display_img.shape[1], c = 'c', s = 5)
+            # plt.imshow(display_img)
             # plt.show()
             # ''''''
             
@@ -255,6 +273,16 @@ if __name__ == "__main__":
             # clear all the gradients before calculating them
             optimizer.zero_grad()
             
+            # check if the landmark is out of range
+            
+            # for ind in range(landmarks.shape[0]):
+            #     temp=landmarks.detach().cpu().numpy()
+            #     temp=temp[ind,:].reshape(-1,2)
+            #     temp=temp*224
+            #     for landmark in temp:
+            #         a=a+1
+
+                
             # find the loss for the current step
             loss_train_step = criterion(predictions, landmarks)
             
@@ -309,4 +337,5 @@ if __name__ == "__main__":
     print('Training Complete')
     print("Total Elapsed Time : {} s".format(time.time()-start_time))
         
+    plt.plot(range(num_epochs),loss_valid_save)
         

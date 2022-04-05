@@ -21,47 +21,6 @@ from torch.utils.data import Dataset, DataLoader
 from torchvision import transforms, utils
 import torchvision.models as models
 import json
-# from pycocotools.coco import COCO
-# from pycocotools import mask as maskUtils
-
-# class ClothLandmarksDataset(Dataset):
-#     """cloth Landmarks dataset."""
-
-#     def __init__(self, csv_file, root_dir, transform=None):
-#         """
-#         Args:
-#             csv_file (string): Path to the csv file with annotations.
-#             root_dir (string): Directory with all the images.
-#             transform (callable, optional): Optional transform to be applied
-#                 on a sample.
-#         """
-#         self.landmarks_frame = pd.read_csv(csv_file)
-#         self.root_dir = root_dir
-#         self.transform = transform
-
-#     def __len__(self):
-#         return len(self.landmarks_frame)
-
-#     def __getitem__(self, idx):
-#         if torch.is_tensor(idx):
-#             idx = idx.tolist()
-
-#         img_name = os.path.join(self.root_dir,
-#                                 self.landmarks_frame.iloc[idx, 0])
-#         image = io.imread(img_name)
-#         landmarks = self.landmarks_frame.iloc[idx, 1:]
-#         landmarks = np.array([landmarks])
-#         landmarks = landmarks.astype('float').reshape(-1, 2)
-#         sample = {'image': image, 'landmarks': landmarks}
-
-#         if self.transform:
-#             sample = self.transform(sample)
-
-#         # return sample
-#         image = sample['image']
-#         landmarks = sample['landmarks']
-        
-#         return image, landmarks
 
 class DeepFashion2Dataset(Dataset):
     
@@ -181,9 +140,25 @@ class Normalize(object):
     def __call__(self, sample):
         image, landmarks = sample['image'], sample['landmarks']
         
-        final_img = cv.normalize(image, None, 0, 255, cv.NORM_MINMAX)
+        # final_img = cv.normalize(image, None, 0, 255, cv.NORM_MINMAX)
         
-        return {'image': image, 'landmarks': landmarks}
+        '''calculate mean & var'''
+        transform = transforms.Compose([
+            transforms.ToTensor()
+            ])
+        img_tr = transform(image)
+        mean, std = img_tr.mean([1,2]), img_tr.std([1,2])
+        
+        '''normalize the image using mean & var'''
+        transform_norm = transforms.Compose([
+            transforms.ToTensor(),
+            transforms.Normalize(mean, std)
+            ])
+        
+        img_normalized = transform_norm(image)
+        img=np.array(img_normalized)
+        
+        return {'image': img.transpose(1,2,0), 'landmarks': landmarks}
     
 class ToTensor(object):
     """Convert ndarrays in sample to Tensors."""
@@ -194,6 +169,7 @@ class ToTensor(object):
         # swap color axis because
         # numpy image: H x W x C
         # torch image: C x H x W
+        landmarks = landmarks / [image.shape[1], image.shape[0]]
         image = image.transpose((2, 0, 1))
         return {'image': torch.from_numpy(image),
                 'landmarks': torch.from_numpy(landmarks)}
@@ -257,7 +233,7 @@ if __name__ == "__main__":
     
     data_transform = transforms.Compose([
         Rescale(256),
-        RandomCrop(224),
+        RandomCrop(250),
         Normalize(),
         ToTensor()
     ])
@@ -265,8 +241,8 @@ if __name__ == "__main__":
     dataset_train = DeepFashion2Dataset(root_json=train_json_path,root_dir=train_img_dir,transform=data_transform)
     dataset_valid = DeepFashion2Dataset(root_json=valid_json_path,root_dir=valid_img_dir,transform=data_transform)
     
-    train_loader = DataLoader(dataset_train, batch_size=4,shuffle=True, num_workers=0)
-    valid_loader = DataLoader(dataset_valid, batch_size=4,shuffle=True, num_workers=0)
+    train_loader = DataLoader(dataset_train, batch_size=16,shuffle=True, num_workers=0)
+    valid_loader = DataLoader(dataset_valid, batch_size=16,shuffle=True, num_workers=0)
     
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
     
@@ -309,12 +285,10 @@ if __name__ == "__main__":
             # temp=images.cpu().detach().numpy()
             # display_img=np.transpose(temp[0,:,:,:], (1,2,0))
             # temp=landmarks.cpu().detach().numpy()
-            # display_landmarks=temp[0,:].reshape(-1,2)
-            
-            # plt.imshow(display_img)
-            # for landmarks in display_landmarks:
-            #     plt.scatter(display_landmarks[:,0], display_landmarks[:,1], c = 'c', s = 5)
+            # display_landmarks=temp[0,:].reshape(-1,2)           
 
+            # plt.scatter(display_landmarks[:,0]*display_img.shape[0], display_landmarks[:,1]*display_img.shape[1], c = 'c', s = 5)
+            # plt.imshow(display_img)
             # plt.show()
             # ''''''
             
@@ -346,6 +320,17 @@ if __name__ == "__main__":
             
                 images = images.float().cuda()
                 landmarks = landmarks.view(landmarks.size(0),-1).float().cuda()
+                
+                # '''visuliaze to check the image and landmarks'''
+                # temp=images.cpu().detach().numpy()
+                # display_img=np.transpose(temp[2,:,:,:], (1,2,0))
+                # temp=landmarks.cpu().detach().numpy()
+                # display_landmarks=temp[2,:].reshape(-1,2)           
+
+                # plt.scatter(display_landmarks[:,0]*display_img.shape[0], display_landmarks[:,1]*display_img.shape[1], c = 'c', s = 5)
+                # plt.imshow(display_img)
+                # plt.show()
+                # ''''''
             
                 predictions = network(images)
     
@@ -376,5 +361,11 @@ if __name__ == "__main__":
          
     print('Training Complete')
     print("Total Elapsed Time : {} s".format(time.time()-start_time))
+    
+    plt.plot(range(num_epochs),loss_train_save)
+    plt.plot(range(num_epochs),loss_valid_save)
+    plt.savefig('./fig1.png', dpi=300)
+    plt.show()
+    # plt.savefig('./fig1.png', dpi=300)
         
         

@@ -188,12 +188,12 @@ class ToTensor(object):
 
     
 #######################################################################
-image_path = '/home/jekim/workspace/resnet_ex/data/images/001000.jpg'
-weights_path = '/home/jekim/workspace/resnet_ex/content/cloth_landmarks.pth'
+image_path = '/home/jekim/workspace/Deepfashion2_Training/Deepfashion2_Training/dataset1_temp/train/img/0107.jpg'
+weights_path = '/home/jekim/workspace/resnet_ex/content/cloth_landmarks_coco.pth'
 # frontal_face_cascade_path = 'haarcascade_frontalface_default.xml'
 #######################################################################
 class Network(nn.Module):
-    def __init__(self,num_classes=34):
+    def __init__(self,num_classes=12):
         super().__init__()
         self.model_name='resnet18'
         self.model=models.resnet18(pretrained=False)
@@ -217,7 +217,7 @@ all_landmarks = []
 
 data_transform = transforms.Compose([
     Rescale(256),
-    RandomCrop(224),
+    RandomCrop(250),
     Normalize(),
     ToTensor()
 ])
@@ -230,7 +230,7 @@ image_test=imagetotest[0].unsqueeze(0).float()
 
 with torch.no_grad():
     landmarks = best_network(image_test)
-    landmarks = (landmarks.view(17,2).detach().numpy())
+    landmarks = (landmarks.view(6,2).detach().numpy())
     all_landmarks.append(landmarks)
 
 plt.figure()
