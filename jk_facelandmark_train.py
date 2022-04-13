@@ -64,6 +64,7 @@ class FaceLandmarksDataset(Dataset):
 
     def __getitem__(self, index):
         image = cv2.imread(self.image_filenames[index], 0)
+        # image = io.imread(self.image_filenames[index])
         landmarks = self.landmarks[index]
         
         if self.transform:
@@ -120,20 +121,22 @@ class Transforms():
     def __call__(self, image, landmarks, crops):
         image = Image.fromarray(image)
         image, landmarks = self.crop_face(image, landmarks, crops)
-        image, landmarks = self.resize(image, landmarks, (224, 224))
-        image, landmarks = self.color_jitter(image, landmarks)
-        image, landmarks = self.rotate(image, landmarks, angle=10)
+        # image, landmarks = self.resize(image, landmarks, (224, 224))
+        image, landmarks = self.resize(image, landmarks, (256, 256))
+        # image, landmarks = self.color_jitter(image, landmarks)
+        # image, landmarks = self.rotate(image, landmarks, angle=10)
         
         image = TF.to_tensor(image)
         image = TF.normalize(image, [0.5], [0.5])
+        # image = TF.normalize(image, [0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
         return image, landmarks
     
 class Network(nn.Module):
     def __init__(self,num_classes=136):
         super().__init__()
         self.model_name='resnet18'
-        # self.model=models.resnet18(pretrained=True)
-        self.model=models.resnet18()
+        self.model=models.resnet18(pretrained=True)
+        # self.model=models.resnet18()
         self.model.conv1=nn.Conv2d(1, 64, kernel_size=7, stride=2, padding=3, bias=False)
         self.model.fc=nn.Linear(self.model.fc.in_features, num_classes)
         
@@ -169,6 +172,8 @@ if __name__ == "__main__":
     train_loader = torch.utils.data.DataLoader(train_dataset, batch_size=64, shuffle=True, num_workers=0)
     valid_loader = torch.utils.data.DataLoader(valid_dataset, batch_size=8, shuffle=True, num_workers=0)
     
+    a, b=train_dataset[1]
+    
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
     
     # '''visulize'''
@@ -193,6 +198,10 @@ if __name__ == "__main__":
     torch.autograd.set_detect_anomaly(True)
     network = Network()
     network.cuda()    
+    
+    timestr = time.strftime("%Y%m%d_%H%M%S")
+    dir_log= os.path.join("/home/jekim/workspace/resnet_ex/log",timestr+'_df2op')
+    os.makedirs(dir_log)
     
     criterion = nn.MSELoss()
     optimizer = optim.Adam(network.parameters(), lr=0.0001)
@@ -220,6 +229,21 @@ if __name__ == "__main__":
             landmarks = landmarks.view(landmarks.size(0),-1).cuda()             
             
             predictions = network(images)
+            
+            '''visuliaze to check the image and landmarks'''
+            temp=images.cpu().detach().numpy()
+            display_img=np.transpose(temp[0,:,:,:], (1,2,0))
+            temp=landmarks.cpu().detach().numpy()
+            display_landmarks=(temp[0,:].reshape(-1,2)+0.5)
+            temp=predictions.cpu().detach().numpy()
+            display_result=(temp[0,:].reshape(-1,2)+0.5)
+
+            plt.scatter(display_landmarks[:,0]*display_img.shape[0], display_landmarks[:,1]*display_img.shape[1], c = 'r', s = 5)
+            plt.scatter(display_result[:,0]*display_img.shape[0], display_result[:,1]*display_img.shape[1], c = 'b', s = 5)
+
+            plt.imshow(display_img.squeeze())
+            plt.show()
+            ''''''
             
             # clear all the gradients before calculating them
             optimizer.zero_grad()
@@ -268,17 +292,33 @@ if __name__ == "__main__":
         loss_valid_save=np.append(loss_valid_save,loss_valid)
         loss_train_save=np.append(loss_train_save,loss_train)
         
-        if loss_valid < loss_min:
-            loss_min = loss_valid
-            torch.save(network.state_dict(), './content/face_landmarks.pth') 
-            print("\nMinimum Validation Loss of {:.4f} at epoch {}/{}".format(loss_min, epoch, num_epochs))
-            print('Model Saved\n')
+        # if loss_valid < loss_min:
+        #     loss_min = loss_valid
+        #     torch.save(network.state_dict(), './content/face_landmarks.pth') 
+        #     print("\nMinimum Validation Loss of {:.4f} at epoch {}/{}".format(loss_min, epoch, num_epochs))
+        #     print('Model Saved\n')
+        
+        # if loss_valid < loss_min:
+        loss_min = loss_valid
+        torch.save(network.state_dict(), os.path.join(dir_log,'df2op_'+str(epoch)+'.pth')) 
+        print("\nMinimum Validation Loss of {:.4f} at epoch {}/{}".format(loss_min, epoch, num_epochs))
+        print('Model Saved\n')
+        plt.plot(range(epoch),loss_train_save,'b-o',label='train loss')
+        plt.plot(range(epoch),loss_valid_save,'r-o',label='validation loss')
+        # legend_without_duplicate_labels(plt)
+        # plt.legend()
+        plt.grid(True)
+        plt.xlabel("epoch")
+        plt.ylabel("loss function")
+        # plt.show()
+        plt.savefig(os.path.join(dir_log,'df2op_loss_function_'+str(epoch)+'.png'), dpi=300)
          
     print('Training Complete')
     print("Total Elapsed Time : {} s".format(time.time()-start_time))
 
-    plt.plot(range(num_epochs),loss_train_save)
-    plt.plot(range(num_epochs),loss_valid_save)
+    plt.plot(range(num_epochs),loss_train_save,'b-o',label='train loss')
+    plt.plot(range(num_epochs),loss_valid_save,'r-o',label='validation loss')
+    plt.legend()
     plt.show()
 
 
