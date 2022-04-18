@@ -9,6 +9,10 @@ add the crop the image alongs to bbox
 
 add some variation of transform
 
+model: resnet18 or conventional CNN
+
+visible 여부 check 하여 MSE 계산시 제거하기.
+
 @author: jekim
 """
 import os
@@ -56,11 +60,18 @@ class DeepFashion2Dataset(Dataset):
         name_annos = os.path.join(self.root_annos,file_name+'.json')
         with open(name_annos) as f: annos = json.load(f)
         
-        landmarks=np.array(annos['item1']['landmarks']).reshape(-1,2)
+        landmarks=np.array(annos['item1']['landmarks']).reshape(-1,3)
+        
+        for ind, landmark in enumerate(landmarks):
+            if landmark[-1]==2:
+                landmark[-1]=1
+            else: 
+                landmark[-1]=0
+            landmarks[ind,:]=landmark
         
         bbox = np.array(annos['item1']['bounding_box'])
-
-        sample = {'image': image, 'landmarks': landmarks, 'bbox': bbox}
+        landmark_vis = np.repeat(landmarks[:,-1],2,axis=0).reshape(-1,2)
+        sample = {'image': image, 'landmarks': landmarks[:,:2], 'bbox': bbox}
         
         '''plot'''
         # plt.imshow(image)
@@ -74,7 +85,7 @@ class DeepFashion2Dataset(Dataset):
         image = sample['image']
         landmarks = sample['landmarks'] - 0.5
         
-        return image, landmarks
+        return image, np.append(landmarks,landmark_vis.reshape(22,-1),axis=1) #return the landmarks with visible index
              
 class ClothCrop(object):
     " crop the area of the cloth in image"
@@ -254,19 +265,29 @@ class ToTensor(object):
                 'landmarks': torch.from_numpy(landmarks)}
     
 class Network(nn.Module):
-    def __init__(self,num_classes=7*2):
+    def __init__(self,num_classes=22*2):
         super().__init__()
         self.model_name='resnet18'
         self.model=models.resnet18(pretrained=True)
         # self.model.conv1=nn.Conv2d(1, 64, kernel_size=7, stride=2, padding=3, bias=False) #in case of the number of input channel = 1 (gray scale)
+        # for param in self.model.parameters():
+        #     param.requires_grad = False
         self.model.fc=nn.Linear(self.model.fc.in_features, num_classes)
         
     def forward(self, x):
         x=self.model(x)
         return x
+    
+    def cal_loss(self, predictions, landmarks_val, landmarks_vis):
+        batch_size = predictions.shape[0]
 
-''' 6. Convolutional Neural Network (CNN) 모델 설계하기 '''
-        
+        mask = landmarks_vis.reshape(batch_size*num_class*2,-1)
+        predic = predictions.reshape(batch_size*num_class*2,-1)
+        gt = landmarks_val.reshape(batch_size*num_class*2,-1)
+                 
+        loss = torch.pow(mask  * (predic - gt), 2).mean()
+
+        return loss        
     
 def print_overwrite(step, total_step, loss, operation):
     sys.stdout.write('\r')
@@ -281,10 +302,10 @@ def print_overwrite(step, total_step, loss, operation):
 if __name__ == "__main__":
         
     
-    train_img_dir = "/home/jekim/workspace/Deepfashion2_Training/Deepfashion2_Training/dataset2_op_small_lower/train/image"
-    train_json_path = "/home/jekim/workspace/Deepfashion2_Training/Deepfashion2_Training/dataset2_op_small_lower/train/annos"
-    valid_img_dir = "/home/jekim/workspace/Deepfashion2_Training/Deepfashion2_Training/dataset2_op_small_lower/validation/image"
-    valid_json_path = "/home/jekim/workspace/Deepfashion2_Training/Deepfashion2_Training/dataset2_op_small_lower/validation/annos"
+    train_img_dir = "/home/jekim/workspace/Deepfashion2_Training/Deepfashion2_Training/dataset2_op_vis/train/image"
+    train_json_path = "/home/jekim/workspace/Deepfashion2_Training/Deepfashion2_Training/dataset2_op_vis/train/annos"
+    valid_img_dir = "/home/jekim/workspace/Deepfashion2_Training/Deepfashion2_Training/dataset2_op_vis/validation/image"
+    valid_json_path = "/home/jekim/workspace/Deepfashion2_Training/Deepfashion2_Training/dataset2_op_vis/validation/annos"
     
     data_transform = transforms.Compose([
         ClothCrop(),
@@ -310,24 +331,32 @@ if __name__ == "__main__":
 
     start_time = time.time()
     
-    num_class = 7
+    num_class = 22
     
-    image_shape =286
+    image_shape = 286
     
     with torch.no_grad():
     
         best_network = Network()
         best_network.cuda()
-        best_network.load_state_dict(torch.load('/home/jekim/workspace/resnet_ex/log/20220413_092215_df2op/df2op_15.pth')) 
+        best_network.load_state_dict(torch.load('/home/jekim/workspace/resnet_ex/log/20220415_162314_df2op/df2op_50.pth')) 
         best_network.eval()
         
         images, landmarks = next(iter(valid_loader))
         
+        # landmarks_val = landmarks[:,:,:2].reshape(batch_size,-1).float().cuda()
+        # landmarks_vis = landmarks[:,:,2:].reshape(batch_size,-1).float().cuda()
+                            
+        # predictions = network(images)
+        
         images = images.float().cuda() # why does it needs a float()
-        landmarks = (landmarks + 0.5) * image_shape
+        landmarks_val = landmarks[:,:,:2].reshape(batch_size,-1).float().cuda()
+        landmarks_vis = landmarks[:,:,2:].reshape(batch_size,-1).float().cuda()
+        
     
         predictions = (best_network(images).cpu() + 0.5) * image_shape
         predictions = predictions.view(-1,num_class,2) # what does this mean?
+        landmarks = (landmarks_val.cpu().view(-1,num_class,2) + 0.5) * image_shape
         
         plt.figure(figsize=(10,40))
         
@@ -335,12 +364,11 @@ if __name__ == "__main__":
             plt.subplot(8,1,img_num+1)
             plt.imshow(images[img_num].cpu().numpy().transpose(1,2,0).squeeze(), cmap='gray')
             plt.scatter(predictions[img_num,:,0], predictions[img_num,:,1], c = 'r', s = 5)
-            # plt.scatter(landmarks[img_num,:,0], landmarks[img_num,:,1], c = 'g', s = 5)
+            plt.scatter(landmarks[img_num,:,0], landmarks[img_num,:,1], c = 'g', s = 5)
     
     # print('Total number of test images: {}'.format(len(valid_dataset)))
     
     end_time = time.time()
-    # print("Elapsed Time : {}".format(end_time - start_time))
     
     # '''test with image'''
     
@@ -400,7 +428,7 @@ if __name__ == "__main__":
     
     # best_network = Network()
     # best_network.cuda()
-    # best_network.load_state_dict(torch.load('/home/jekim/workspace/resnet_ex/log/20220413_092215_df2op/df2op_20.pth')) 
+    # best_network.load_state_dict(torch.load('/home/jekim/workspace/resnet_ex/log/20220415_162314_df2op/df2op_50.pth')) 
     # best_network.eval()
     
     # images = image.float().cuda()
@@ -421,8 +449,5 @@ if __name__ == "__main__":
 
     # plt.imshow(display_img.squeeze())
     # plt.show()
-    
-    
-    
-    
+        
         

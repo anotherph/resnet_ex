@@ -4,6 +4,8 @@
 Created on Thu Mar 31 13:53:29 2022
 
 @author: jekim
+
+소리꾼 데이터 이용
 """
 import os
 import sys 

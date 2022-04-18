@@ -9,6 +9,10 @@ add the crop the image alongs to bbox
 
 add some variation of transform
 
+model: AE
+
+ground truth : heatmap with landmarks 
+
 @author: jekim
 """
 import os
@@ -29,6 +33,7 @@ from torch.utils.data import Dataset, DataLoader
 from torchvision import transforms, utils
 import torchvision.models as models
 import json
+from scipy.stats import multivariate_normal
 
 class DeepFashion2Dataset(Dataset):
     
@@ -72,9 +77,26 @@ class DeepFashion2Dataset(Dataset):
 
         # return sample
         image = sample['image']
-        landmarks = sample['landmarks'] - 0.5
+        landmarks = sample['landmarks']
         
-        return image, landmarks
+        '''make heatmap for ground truth'''
+        # heatmap_2dim = np.zeros((image.shape[1],image.shape[2]))
+        heatmap = np.zeros((7,image.shape[1],image.shape[2])) # make channel corresponding to the number of class
+        length=heatmap.shape[1]
+        pos=np.dstack(np.mgrid[0:length:1,0:length:1])
+        for int, landmark in enumerate(landmarks):
+            rv = multivariate_normal(mean=np.flip(landmark), cov=100)
+            heatmap[int,:,:]=rv.pdf(pos)/rv.pdf(pos).max()
+        
+        # heatmap[:,:,0]=heatmap_2dim
+        # heatmap[:,:,1]=heatmap_2dim
+        # heatmap[:,:,2]=heatmap_2dim
+        
+        # heatmap=torch.from_numpy(heatmap_2dim.transpose((2,0,1)))
+        
+        heatmap=torch.from_numpy(heatmap)
+                   
+        return image, heatmap
              
 class ClothCrop(object):
     " crop the area of the cloth in image"
@@ -98,7 +120,6 @@ class ClothCrop(object):
             landmarks = landmarks - [bbox[0], bbox[1]]
     
         
-    
         return {'image': image, 'landmarks': landmarks}
     
 class Rescale(object):
@@ -187,6 +208,9 @@ class Rescale_padding(object):
         img_padded = np.ones((max_wh,max_wh,3))*(-1)
         img_padded[int(b_pad):int(b_pad)+h,int(l_pad):int(l_pad)+w,:]=img
         
+        # img_padded = np.ones((max_wh,max_wh))*(-1)
+        # img_padded[int(b_pad):int(b_pad)+h,int(l_pad):int(l_pad)+w]=img
+        
         landmarks = landmarks + [int(l_pad),int(b_pad)]
                 
 
@@ -226,7 +250,7 @@ class Normalize(object):
         img_normalized = transform_norm(image)
         img=np.array(img_normalized)
         
-        landmarks = landmarks / [img.transpose(1,2,0).shape[1], img.transpose(1,2,0).shape[0]]
+        # landmarks = landmarks / [img.transpose(1,2,0).shape[1], img.transpose(1,2,0).shape[0]]
         
         # image = TF.normalize(image, [0.5], [0.5])
         
@@ -243,7 +267,7 @@ class ToTensor(object):
         # swap color axis because
         # numpy image: H x W x C
         # torch image: C x H x W
-        landmarks = landmarks / [image.shape[1], image.shape[0]]
+        # landmarks = landmarks / [image.shape[1], image.shape[0]]
         image = image.transpose((2, 0, 1))
         
         # plt.scatter(landmarks[:,0]*image.shape[0], landmarks[:,1]*image.shape[1], c = 'c', s = 5)
@@ -253,20 +277,80 @@ class ToTensor(object):
         return {'image': torch.from_numpy(image),
                 'landmarks': torch.from_numpy(landmarks)}
     
-class Network(nn.Module):
-    def __init__(self,num_classes=7*2):
-        super().__init__()
-        self.model_name='resnet18'
-        self.model=models.resnet18(pretrained=True)
-        # self.model.conv1=nn.Conv2d(1, 64, kernel_size=7, stride=2, padding=3, bias=False) #in case of the number of input channel = 1 (gray scale)
-        self.model.fc=nn.Linear(self.model.fc.in_features, num_classes)
-        
-    def forward(self, x):
-        x=self.model(x)
-        return x
+'''network'''
 
-''' 6. Convolutional Neural Network (CNN) 모델 설계하기 '''
+class AutoEncoder(nn.Module): 
+    def __init__(self): 
+        super(Autoencoder, self).__init__() 
+        self.encoder = nn.Sequential( 
+            nn.Linear(28*28, 128), 
+            nn.ReLU(), 
+            nn.Linear(128, 64), 
+            nn.ReLU(), 
+            nn.Linear(64, 12), 
+            nn.ReLU(), nn.Linear(12, 3), 
+            ) 
         
+        self.decoder = nn.Sequential( 
+            nn.Linear(3, 12), 
+            nn.ReLU(), 
+            nn.Linear(12, 64), 
+            nn.ReLU(), 
+            nn.Linear(64, 128), 
+            nn.ReLU(), 
+            nn.Linear(128, 28*28), 
+            nn.Sigmoid(), 
+            ) 
+        
+        def forward(self, x): 
+            encoded = self.encoder(x) 
+            decoded = self.decoder(encoded) 
+            return encoded, decoded
+
+class ConvAutoEncoder(nn.Module):
+    def __init__(self):
+        super(ConvAutoEncoder, self).__init__()
+        
+        # Encoder
+        self.cnn_layer1 = nn.Sequential(
+                        nn.Conv2d(3, 16, kernel_size=3, stride=1, padding=1),
+                        nn.ReLU(),
+                         nn.MaxPool2d(2,2))
+
+        self.cnn_layer2 = nn.Sequential(
+                                nn.Conv2d(16, 32, kernel_size=3, stride=1, padding=1),
+                                nn.ReLU(),
+                                 nn.MaxPool2d(2,2))
+        
+        self.cnn_layer3 = nn.Sequential(
+                                nn.Conv2d(32, 64, kernel_size=3, stride=1, padding=1),
+                                nn.ReLU(),
+                                 nn.MaxPool2d(2,2))
+
+        # Decoder
+        
+        self.tran_cnn_layer1 = nn.Sequential(
+                        nn.ConvTranspose2d(64, 32, kernel_size = 3, stride = 2, padding=0),
+                        nn.ReLU())
+        
+        self.tran_cnn_layer2 = nn.Sequential(
+                        nn.ConvTranspose2d(32, 16, kernel_size = 3, stride = 2, padding=0),
+                        nn.ReLU())
+
+        self.tran_cnn_layer3 = nn.Sequential(
+                        nn.ConvTranspose2d(16, 7, kernel_size = 3, stride = 2, padding=0),
+                        nn.Sigmoid())
+            
+            
+    def forward(self, x):
+        output = self.cnn_layer1(x)
+        output = self.cnn_layer2(output)
+        output = self.cnn_layer3(output)
+        output = self.tran_cnn_layer1(output)
+        output = self.tran_cnn_layer2(output)
+        output = self.tran_cnn_layer3(output)
+
+        return output[:,:,:286,:286]
     
 def print_overwrite(step, total_step, loss, operation):
     sys.stdout.write('\r')
@@ -306,123 +390,149 @@ if __name__ == "__main__":
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
     
 
-    '''validation'''
-
+    ''' train '''
+    
+    timestr = time.strftime("%Y%m%d_%H%M%S")
+    dir_log= os.path.join("/home/jekim/workspace/resnet_ex/log",timestr+'_df2op')
+    os.makedirs(dir_log)
+    
+    network = ConvAutoEncoder()
+    # network = CNN()
+    network.to(device)
+    
+    criterion = nn.MSELoss()
+    # criterion = nn.CrossEntropyLoss()
+    optimizer = optim.Adam(network.parameters(), lr=0.0001)
+    # optimizer = optim.SGD(network.parameters(), lr=0.001, momentum=0.9)
+    
+    loss_min = np.inf
+    num_epochs = 15
+    
     start_time = time.time()
     
-    num_class = 7
+    loss_valid_save = np.array([])
+    loss_train_save = np.array([])
     
-    image_shape =286
-    
-    with torch.no_grad():
-    
-        best_network = Network()
-        best_network.cuda()
-        best_network.load_state_dict(torch.load('/home/jekim/workspace/resnet_ex/log/20220413_092215_df2op/df2op_15.pth')) 
-        best_network.eval()
+    for epoch in range(1,num_epochs+1):
         
-        images, landmarks = next(iter(valid_loader))
+        loss_train = 0
+        loss_valid = 0
+        running_loss = 0
         
-        images = images.float().cuda() # why does it needs a float()
-        landmarks = (landmarks + 0.5) * image_shape
-    
-        predictions = (best_network(images).cpu() + 0.5) * image_shape
-        predictions = predictions.view(-1,num_class,2) # what does this mean?
+        network.train()
+        for step in range(1,len(train_loader)+1):
         
-        plt.figure(figsize=(10,40))
+            images, heatmap = next(iter(train_loader))
+            
+            images = images.float().cuda()
+            heatmap = heatmap.float().cuda()
+            # images = images.cuda()
+
+            # landmarks = landmarks.view(landmarks.size(0),-1).float().cuda() 
+            # landmarks = landmarks.view(landmarks.size(0),-1).cuda() 
         
-        for img_num in range(1):
-            plt.subplot(8,1,img_num+1)
-            plt.imshow(images[img_num].cpu().numpy().transpose(1,2,0).squeeze(), cmap='gray')
-            plt.scatter(predictions[img_num,:,0], predictions[img_num,:,1], c = 'r', s = 5)
-            # plt.scatter(landmarks[img_num,:,0], landmarks[img_num,:,1], c = 'g', s = 5)
-    
-    # print('Total number of test images: {}'.format(len(valid_dataset)))
-    
-    end_time = time.time()
-    # print("Elapsed Time : {}".format(end_time - start_time))
-    
-    # '''test with image'''
-    
-    # image = io.imread('/home/jekim/workspace/Deep-Fashion-Analysis-ECCV2018/pics/test_7.jpg')
-    # # image = image[80:280,30:200,:] # test_2
-    # # image = image[50:280,70:250,:] # test_10 
-    # # image = image[120:600,150:350,:] # test_12
-    # image = image[100:400,50:320,:] # test_7
-    
-    # image_shape =286
-    
-    # '''rescale'''
+            predictions = network(images)
+            
+            # '''visuliaze to check the image and landmarks'''
+            # temp=images.cpu().detach().numpy()
+            # display_img=np.transpose(temp[0,:,:,:], (1,2,0)).squeeze()
+            # temp=heatmap.cpu().detach().numpy()
+            # display_heatmap=np.transpose(temp[0,:,:,:], (1,2,0)).squeeze()
+            # temp=predictions.cpu().detach().numpy()
+            # display_result=np.transpose(temp[0,:,:,:], (1,2,0)).squeeze()
 
-    # h, w = image.shape[:2]
-    # output_size =256
-    # if isinstance(output_size, int):
-    #     if h < w:
-    #         new_h, new_w = output_size * h / w, output_size
-    #     else:
-    #         new_h, new_w = output_size, output_size * w / h
-    # else:
-    #     new_h, new_w = output_size
+            # plt.imshow(display_img+10*display_heatmap)
+            # plt.show()
+            # ''''''
+            
+            # clear all the gradients before calculating them
+            optimizer.zero_grad()
+            
+            # find the loss for the current step
+            loss_train_step = criterion(predictions, heatmap)
+            
+            # calculate the gradients
+            loss_train_step.backward()
+            
+            # update the parameters
+            optimizer.step()
+            
+            loss_train += loss_train_step.item()
+            running_loss = loss_train/step
+            
+            print_overwrite(step, len(train_loader), running_loss, 'train')
+            
+        network.eval() 
+        with torch.no_grad():
+            
+            for step in range(1,len(valid_loader)+1):
+                
+                images, heatmap = next(iter(valid_loader))
+            
+                images = images.float().cuda()
+                heatmap = heatmap.float().cuda()
+                # images = images.cuda()
+                # landmarks = landmarks.view(landmarks.size(0),-1).float().cuda()
+                # landmarks = landmarks.view(landmarks.size(0),-1).cuda()
+                            
+                predictions = network(images)
+                
+                # '''visuliaze to check the image and landmarks'''
+                # temp=images.cpu().detach().numpy()
+                # display_img=np.transpose(temp[0,:,:,:], (1,2,0)).squeeze()
+                # temp=heatmap.cpu().detach().numpy()
+                # display_heatmap=np.transpose(temp[0,:,:,:], (1,2,0)).squeeze()
+                # temp=predictions.cpu().detach().numpy()
+                # display_result=np.transpose(temp[0,:,:,:], (1,2,0)).squeeze()
 
-    # new_h, new_w = int(new_h), int(new_w)
-
-    # img = transform.resize(image, (new_h, new_w))
-
-    # # h and w are swapped for landmarks because for images,
-    # # x and y axes are axis 1 and 0 respectively
-    # # landmarks = landmarks * [new_w / w, new_h / h]
+                # plt.imshow(display_img+10*display_result)
+                # plt.show()
+                # ''''''
     
-    # '''padding'''
+                # find the loss for the current step
+                loss_valid_step = criterion(predictions, heatmap)
     
-    # h, w = img.shape[:2]
-    # # max_wh = np.max([w, h]) #padding
-    # max_wh = output_size+30 #padding to extended box
-    # h_padding = (max_wh - w) / 2
-    # v_padding = (max_wh - h) / 2
-    # l_pad = h_padding if h_padding % 1 == 0 else h_padding+0.5 # left
-    # t_pad = v_padding if v_padding % 1 == 0 else v_padding+0.5 # top
-    # r_pad = h_padding if h_padding % 1 == 0 else h_padding-0.5 # right
-    # b_pad = v_padding if v_padding % 1 == 0 else v_padding-0.5 # bottom
-    # padding = (int(l_pad), int(t_pad), int(r_pad), int(b_pad))
+                loss_valid += loss_valid_step.item()
+            
+                running_loss = loss_valid/step
     
-    # img_padded = np.ones((max_wh,max_wh,3))*(-1)
-    # img_padded[int(b_pad):int(b_pad)+h,int(l_pad):int(l_pad)+w,:]=img
+                print_overwrite(step, len(valid_loader), running_loss, 'valid')
+        
+        loss_train /= len(train_loader)
+        loss_valid /= len(valid_loader)
+        
+        print('\n--------------------------------------------------')
+        print('Epoch: {}  Train Loss: {:.4f}  Valid Loss: {:.4f}'.format(epoch, loss_train, loss_valid))
+        print('--------------------------------------------------')
+        
+        loss_valid_save=np.append(loss_valid_save,loss_valid)
+        loss_train_save=np.append(loss_train_save,loss_train)
+        
+        # if loss_valid < loss_min:
+        loss_min = loss_valid
+        torch.save(network.state_dict(), os.path.join(dir_log,'df2op_'+str(epoch)+'.pth')) 
+        print("\nMinimum Validation Loss of {:.4f} at epoch {}/{}".format(loss_min, epoch, num_epochs))
+        print('Model Saved\n')
+        plt.plot(range(epoch),loss_train_save,'b-o',label='train loss')
+        plt.plot(range(epoch),loss_valid_save,'r-o',label='validation loss')
+        # legend_without_duplicate_labels(plt)
+        # plt.legend()
+        plt.grid(True)
+        plt.xlabel("epoch")
+        plt.ylabel("loss function")
+        # plt.show()
+        plt.savefig(os.path.join(dir_log,'df2op_loss_function_'+str(epoch)+'.png'), dpi=300)
+         
+    print('Training Complete')
+    print("Total Elapsed Time : {} s".format(time.time()-start_time))
     
-    # '''normalize the image using mean & var'''
-    # transform_norm = transforms.Compose([
-    #     transforms.ToTensor(),
-    #     transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
-    #     # transforms.Normalize([0.5], [0.5])
-    #     ])
-    
-    # image = transform_norm(img_padded)
-    # # img=np.array(img_normalized)
-    
-    # best_network = Network()
-    # best_network.cuda()
-    # best_network.load_state_dict(torch.load('/home/jekim/workspace/resnet_ex/log/20220413_092215_df2op/df2op_20.pth')) 
-    # best_network.eval()
-    
-    # images = image.float().cuda()
-    # predictions = best_network(images.unsqueeze(0))
-    # # predictions = (best_network(images).cpu() + 0.5) * image_shape
-    # # predictions = predictions.view(-1,num_class,2) 
-    
-    # '''visuliaze to check the image and landmarks'''
-    # temp=images.cpu().detach().numpy()
-    # display_img=np.transpose(temp, (1,2,0))
-    # # temp=landmarks.cpu().detach().numpy()!
-    # # display_landmarks=(temp[0,:].reshape(-1,2)+0.5)
-    # temp=predictions.cpu().detach().numpy()
-    # display_result=(temp[0,:].reshape(-1,2)+0.5)
-
-    # # plt.scatter(display_landmarks[:,0]*display_img.shape[0], display_landmarks[:,1]*display_img.shape[1], c = 'r', s = 5)
-    # plt.scatter(display_result[:,0]*display_img.shape[0], display_result[:,1]*display_img.shape[1], c = 'b', s = 5)
-
-    # plt.imshow(display_img.squeeze())
+    # plt.plot(range(num_epochs),loss_train_save)
+    # plt.plot(range(num_epochs),loss_valid_save)
+    # plt.savefig('./loss_fuction.png', dpi=300)
+    # plt.grid(True)
+    # plt.xlabel("epoch")
+    # plt.ylabel("loss function")
     # plt.show()
-    
-    
-    
-    
+
+        
         

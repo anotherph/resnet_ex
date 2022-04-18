@@ -9,6 +9,10 @@ add the crop the image alongs to bbox
 
 add some variation of transform
 
+model: resnet18 or conventional CNN
+
+visible 여부 check 하여 MSE 계산시 제거하기.
+
 @author: jekim
 """
 import os
@@ -56,11 +60,18 @@ class DeepFashion2Dataset(Dataset):
         name_annos = os.path.join(self.root_annos,file_name+'.json')
         with open(name_annos) as f: annos = json.load(f)
         
-        landmarks=np.array(annos['item1']['landmarks']).reshape(-1,2)
+        landmarks=np.array(annos['item1']['landmarks']).reshape(-1,3)
+        
+        for ind, landmark in enumerate(landmarks):
+            if landmark[-1]==2:
+                landmark[-1]=1
+            else: 
+                landmark[-1]=0
+            landmarks[ind,:]=landmark
         
         bbox = np.array(annos['item1']['bounding_box'])
-
-        sample = {'image': image, 'landmarks': landmarks, 'bbox': bbox}
+        landmark_vis = np.repeat(landmarks[:,-1],2,axis=0).reshape(-1,2)
+        sample = {'image': image, 'landmarks': landmarks[:,:2], 'bbox': bbox}
         
         '''plot'''
         # plt.imshow(image)
@@ -74,7 +85,7 @@ class DeepFashion2Dataset(Dataset):
         image = sample['image']
         landmarks = sample['landmarks'] - 0.5
         
-        return image, landmarks
+        return image, np.append(landmarks,landmark_vis.reshape(22,-1),axis=1) #return the landmarks with visible index
              
 class ClothCrop(object):
     " crop the area of the cloth in image"
@@ -254,18 +265,71 @@ class ToTensor(object):
                 'landmarks': torch.from_numpy(landmarks)}
     
 class Network(nn.Module):
-    def __init__(self,num_classes=7*2):
+    def __init__(self,num_classes=22*2):
         super().__init__()
         self.model_name='resnet18'
         self.model=models.resnet18(pretrained=True)
         # self.model.conv1=nn.Conv2d(1, 64, kernel_size=7, stride=2, padding=3, bias=False) #in case of the number of input channel = 1 (gray scale)
+        # for param in self.model.parameters():
+        #     param.requires_grad = False
         self.model.fc=nn.Linear(self.model.fc.in_features, num_classes)
         
     def forward(self, x):
         x=self.model(x)
         return x
+    
+    def cal_loss(self, predictions, landmarks_val, landmarks_vis):
+        batch_size = predictions.shape[0]
+
+        mask = landmarks_vis.reshape(batch_size*num_class*2,-1)
+        predic = predictions.reshape(batch_size*num_class*2,-1)
+        gt = landmarks_val.reshape(batch_size*num_class*2,-1)
+                 
+        loss = torch.pow(mask  * (predic - gt), 2).mean()
+
+        return loss
 
 ''' 6. Convolutional Neural Network (CNN) 모델 설계하기 '''
+
+class CNN(nn.Module):
+  def __init__(self,num_classes=19*2):
+    super(CNN,self).__init__()
+    self.layer = nn.Sequential(
+        nn.Conv2d(3,16,3,padding=1), # in channel:3, out channel:16, kernel_size=3 
+        nn.ReLU(),
+        nn.Conv2d(16,32,3,padding=1), # in channel:16, out channel:32, kernel_size=3
+        nn.ReLU(),
+        nn.MaxPool2d(2,2), # 32x16x16
+        nn.Dropout(0.5),
+
+        nn.Conv2d(32,64,3,padding=1), # in channel:32, out channel:64, kernel_size=3 
+        nn.ReLU(),
+        nn.Conv2d(64,128,3,padding=1), # in channel:64, out channel:128, kernel_size=3
+        nn.ReLU(),
+        nn.MaxPool2d(2,2), # 128x8x8
+        nn.Dropout(0.5),
+
+        nn.Conv2d(128,256,3,padding=1), # in channel:128, out channel:256, kernel_size=3 
+        nn.ReLU(),
+        nn.Conv2d(256,256,3,padding=1), # in channel:256, out channel:256, kernel_size=3
+        nn.ReLU(),
+        nn.MaxPool2d(2,2), # 256x4x4
+        nn.Dropout(0.5)
+    )
+    self.fc_layer = nn.Sequential(
+        nn.Linear(256*32*32,200), # input node : 256*4*4, output node : 200
+        nn.ReLU(),
+        nn.Dropout(0.5),
+        nn.Linear(200,num_classes)
+    )
+
+  def forward(self,x):
+    out = self.layer(x) # out = (256 , 4 , 4)
+    # .view는 reshape과 같은 역할
+    # out = out.view(batch_size,-1) # (256 , 4 , 4) => (batch, 256 x 4 x 4)
+    out = out.view(batch_size,-1)
+    out = self.fc_layer(out)
+    return out
         
     
 def print_overwrite(step, total_step, loss, operation):
@@ -281,10 +345,10 @@ def print_overwrite(step, total_step, loss, operation):
 if __name__ == "__main__":
         
     
-    train_img_dir = "/home/jekim/workspace/Deepfashion2_Training/Deepfashion2_Training/dataset2_op_small_lower/train/image"
-    train_json_path = "/home/jekim/workspace/Deepfashion2_Training/Deepfashion2_Training/dataset2_op_small_lower/train/annos"
-    valid_img_dir = "/home/jekim/workspace/Deepfashion2_Training/Deepfashion2_Training/dataset2_op_small_lower/validation/image"
-    valid_json_path = "/home/jekim/workspace/Deepfashion2_Training/Deepfashion2_Training/dataset2_op_small_lower/validation/annos"
+    train_img_dir = "/home/jekim/workspace/Deepfashion2_Training/Deepfashion2_Training/dataset2_op_vis/train/image"
+    train_json_path = "/home/jekim/workspace/Deepfashion2_Training/Deepfashion2_Training/dataset2_op_vis/train/annos"
+    valid_img_dir = "/home/jekim/workspace/Deepfashion2_Training/Deepfashion2_Training/dataset2_op_vis/validation/image"
+    valid_json_path = "/home/jekim/workspace/Deepfashion2_Training/Deepfashion2_Training/dataset2_op_vis/validation/annos"
     
     data_transform = transforms.Compose([
         ClothCrop(),
@@ -306,123 +370,165 @@ if __name__ == "__main__":
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
     
 
-    '''validation'''
-
+    ''' train '''
+    
+    timestr = time.strftime("%Y%m%d_%H%M%S")
+    dir_log= os.path.join("/home/jekim/workspace/resnet_ex/log",timestr+'_df2op')
+    os.makedirs(dir_log)
+    
+    network = Network()
+    # network = CNN()
+    network.to(device)
+    
+    # criterion = nn.MSELoss()
+    # criterion = network.cal_loss()
+    # criterion = nn.CrossEntropyLoss()
+    # optimizer = optim.Adam(network.parameters(), lr=0.0001)
+    optimizer = optim.Adam(network.parameters(), lr=1e-7)
+    # optimizer = optim.Adam(network.model.fc.parameters(),lr=0.0001) # turning the last fc layer 
+    # optimizer = optim.SGD(network.parameters(), lr=0.001, momentum=0.9)
+    
+    loss_min = np.inf
+    num_epochs = 100
+    num_class = 22
+    
     start_time = time.time()
     
-    num_class = 7
+    loss_valid_save = np.array([])
+    loss_train_save = np.array([])
     
-    image_shape =286
-    
-    with torch.no_grad():
-    
-        best_network = Network()
-        best_network.cuda()
-        best_network.load_state_dict(torch.load('/home/jekim/workspace/resnet_ex/log/20220413_092215_df2op/df2op_15.pth')) 
-        best_network.eval()
+    for epoch in range(1,num_epochs+1):
         
-        images, landmarks = next(iter(valid_loader))
+        loss_train = 0
+        loss_valid = 0
+        running_loss = 0
         
-        images = images.float().cuda() # why does it needs a float()
-        landmarks = (landmarks + 0.5) * image_shape
-    
-        predictions = (best_network(images).cpu() + 0.5) * image_shape
-        predictions = predictions.view(-1,num_class,2) # what does this mean?
+        network.train()
+        for step in range(1,len(train_loader)+1):
         
-        plt.figure(figsize=(10,40))
+            images, landmarks = next(iter(train_loader))
+            
+            images = images.float().cuda()
+            # images = images.cuda()
+
+            landmarks_val = landmarks[:,:,:2].reshape(batch_size,-1).float().cuda()
+            landmarks_vis = landmarks[:,:,2:].reshape(batch_size,-1).float().cuda()
+            # zitter= (np.random.rand(batch_size,num_class*2)-0.5)*(10/286) # make zitter with 5pixel
+            # landmarks = landmarks+torch.Tensor(zitter).cuda()
+            # landmarks = landmarks.view(landmarks.size(0),-1).cuda() 
         
-        for img_num in range(1):
-            plt.subplot(8,1,img_num+1)
-            plt.imshow(images[img_num].cpu().numpy().transpose(1,2,0).squeeze(), cmap='gray')
-            plt.scatter(predictions[img_num,:,0], predictions[img_num,:,1], c = 'r', s = 5)
-            # plt.scatter(landmarks[img_num,:,0], landmarks[img_num,:,1], c = 'g', s = 5)
-    
-    # print('Total number of test images: {}'.format(len(valid_dataset)))
-    
-    end_time = time.time()
-    # print("Elapsed Time : {}".format(end_time - start_time))
-    
-    # '''test with image'''
-    
-    # image = io.imread('/home/jekim/workspace/Deep-Fashion-Analysis-ECCV2018/pics/test_7.jpg')
-    # # image = image[80:280,30:200,:] # test_2
-    # # image = image[50:280,70:250,:] # test_10 
-    # # image = image[120:600,150:350,:] # test_12
-    # image = image[100:400,50:320,:] # test_7
-    
-    # image_shape =286
-    
-    # '''rescale'''
+            predictions = network(images)
+            
+            # '''visuliaze to check the image and landmarks'''
+            # temp=images.cpu().detach().numpy()
+            # display_img=np.transpose(temp[0,:,:,:], (1,2,0))
+            # temp=landmarks_val.cpu().detach().numpy()
+            # display_landmarks=(temp[0,:].reshape(-1,2)+0.5)
+            # temp=predictions.cpu().detach().numpy()
+            # display_result=(temp[0,:].reshape(-1,2)+0.5)
 
-    # h, w = image.shape[:2]
-    # output_size =256
-    # if isinstance(output_size, int):
-    #     if h < w:
-    #         new_h, new_w = output_size * h / w, output_size
-    #     else:
-    #         new_h, new_w = output_size, output_size * w / h
-    # else:
-    #     new_h, new_w = output_size
+            # plt.scatter(display_landmarks[:,0]*display_img.shape[0], display_landmarks[:,1]*display_img.shape[1], c = 'r', s = 5)
+            # plt.scatter(display_result[:,0]*display_img.shape[0], display_result[:,1]*display_img.shape[1], c = 'b', s = 5)
 
-    # new_h, new_w = int(new_h), int(new_w)
-
-    # img = transform.resize(image, (new_h, new_w))
-
-    # # h and w are swapped for landmarks because for images,
-    # # x and y axes are axis 1 and 0 respectively
-    # # landmarks = landmarks * [new_w / w, new_h / h]
+            # plt.imshow(display_img.squeeze())
+            # plt.show()
+            # ''''''
+            
+            # clear all the gradients before calculating them
+            optimizer.zero_grad()
+            
+            # find the loss for the current step
+            # loss_train_step = criterion(predictions, landmarks)
+            loss_train_step = network.cal_loss(predictions, landmarks_val, landmarks_vis)
+            
+            # calculate the gradients
+            loss_train_step.backward()
+            
+            # update the parameters
+            optimizer.step()
+            
+            loss_train += loss_train_step.item()
+            running_loss = loss_train/step
+            
+            print_overwrite(step, len(train_loader), running_loss, 'train')
+            
+        network.eval() 
+        with torch.no_grad():
+            
+            for step in range(1,len(valid_loader)+1):
+                
+                images, landmarks = next(iter(valid_loader))
+            
+                images = images.float().cuda()
+                # images = images.cuda()
+                # landmarks = landmarks.view(landmarks.size(0),-1).float().cuda()
+                # landmarks = landmarks.view(landmarks.size(0),-1).cuda()
+                
+                landmarks_val = landmarks[:,:,:2].reshape(batch_size,-1).float().cuda()
+                landmarks_vis = landmarks[:,:,2:].reshape(batch_size,-1).float().cuda()
+                            
+                predictions = network(images)
+                
+                # '''visuliaze to check the image and landmarks'''
+                # temp=images.cpu().detach().numpy()
+                # display_img=np.transpose(temp[0,:,:,:], (1,2,0))
+                # temp=landmarks.cpu().detach().numpy()
+                # display_landmarks=(temp[0,:].reshape(-1,2)+0.5)
+                # temp=predictions.cpu().detach().numpy()
+                # display_result=(temp[0,:].reshape(-1,2)+0.5)
     
-    # '''padding'''
+                # plt.scatter(display_landmarks[:,0]*display_img.shape[0], display_landmarks[:,1]*display_img.shape[1], c = 'r', s = 5)
+                # plt.scatter(display_result[:,0]*display_img.shape[0], display_result[:,1]*display_img.shape[1], c = 'b', s = 5)
     
-    # h, w = img.shape[:2]
-    # # max_wh = np.max([w, h]) #padding
-    # max_wh = output_size+30 #padding to extended box
-    # h_padding = (max_wh - w) / 2
-    # v_padding = (max_wh - h) / 2
-    # l_pad = h_padding if h_padding % 1 == 0 else h_padding+0.5 # left
-    # t_pad = v_padding if v_padding % 1 == 0 else v_padding+0.5 # top
-    # r_pad = h_padding if h_padding % 1 == 0 else h_padding-0.5 # right
-    # b_pad = v_padding if v_padding % 1 == 0 else v_padding-0.5 # bottom
-    # padding = (int(l_pad), int(t_pad), int(r_pad), int(b_pad))
+                # plt.imshow(display_img.squeeze())
+                # plt.show()
+                # ''''''
     
-    # img_padded = np.ones((max_wh,max_wh,3))*(-1)
-    # img_padded[int(b_pad):int(b_pad)+h,int(l_pad):int(l_pad)+w,:]=img
+                # find the loss for the current step
+                # loss_valid_step = criterion(predictions, landmarks)
+                loss_valid_step = network.cal_loss(predictions, landmarks_val, landmarks_vis)
     
-    # '''normalize the image using mean & var'''
-    # transform_norm = transforms.Compose([
-    #     transforms.ToTensor(),
-    #     transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
-    #     # transforms.Normalize([0.5], [0.5])
-    #     ])
+                loss_valid += loss_valid_step.item()
+            
+                running_loss = loss_valid/step
     
-    # image = transform_norm(img_padded)
-    # # img=np.array(img_normalized)
+                print_overwrite(step, len(valid_loader), running_loss, 'valid')
+        
+        loss_train /= len(train_loader)
+        loss_valid /= len(valid_loader)
+        
+        print('\n--------------------------------------------------')
+        print('Epoch: {}  Train Loss: {:.4f}  Valid Loss: {:.4f}'.format(epoch, loss_train, loss_valid))
+        print('--------------------------------------------------')
+        
+        loss_valid_save=np.append(loss_valid_save,loss_valid)
+        loss_train_save=np.append(loss_train_save,loss_train)
+        
+        # if loss_valid < loss_min:
+        loss_min = loss_valid
+        torch.save(network.state_dict(), os.path.join(dir_log,'df2op_'+str(epoch)+'.pth')) 
+        print("\nMinimum Validation Loss of {:.4f} at epoch {}/{}".format(loss_min, epoch, num_epochs))
+        print('Model Saved\n')
+        plt.plot(range(epoch),loss_train_save,'b-o',label='train loss')
+        plt.plot(range(epoch),loss_valid_save,'r-o',label='validation loss')
+        # legend_without_duplicate_labels(plt)
+        # plt.legend()
+        plt.grid(True)
+        plt.xlabel("epoch")
+        plt.ylabel("loss function")
+        # plt.show()
+        plt.savefig(os.path.join(dir_log,'df2op_loss_function_'+str(epoch)+'.png'), dpi=300)
+         
+    print('Training Complete')
+    print("Total Elapsed Time : {} s".format(time.time()-start_time))
     
-    # best_network = Network()
-    # best_network.cuda()
-    # best_network.load_state_dict(torch.load('/home/jekim/workspace/resnet_ex/log/20220413_092215_df2op/df2op_20.pth')) 
-    # best_network.eval()
-    
-    # images = image.float().cuda()
-    # predictions = best_network(images.unsqueeze(0))
-    # # predictions = (best_network(images).cpu() + 0.5) * image_shape
-    # # predictions = predictions.view(-1,num_class,2) 
-    
-    # '''visuliaze to check the image and landmarks'''
-    # temp=images.cpu().detach().numpy()
-    # display_img=np.transpose(temp, (1,2,0))
-    # # temp=landmarks.cpu().detach().numpy()!
-    # # display_landmarks=(temp[0,:].reshape(-1,2)+0.5)
-    # temp=predictions.cpu().detach().numpy()
-    # display_result=(temp[0,:].reshape(-1,2)+0.5)
-
-    # # plt.scatter(display_landmarks[:,0]*display_img.shape[0], display_landmarks[:,1]*display_img.shape[1], c = 'r', s = 5)
-    # plt.scatter(display_result[:,0]*display_img.shape[0], display_result[:,1]*display_img.shape[1], c = 'b', s = 5)
-
-    # plt.imshow(display_img.squeeze())
+    # plt.plot(range(num_epochs),loss_train_save)
+    # plt.plot(range(num_epochs),loss_valid_save)
+    # plt.savefig('./loss_fuction.png', dpi=300)
+    # plt.grid(True)
+    # plt.xlabel("epoch")
+    # plt.ylabel("loss function")
     # plt.show()
-    
-    
-    
-    
+
+        
         

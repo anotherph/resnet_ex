@@ -3,8 +3,13 @@
 """
 Created on Thu Mar 31 13:53:29 2022
 
-deepfashion dataset 2 - one-piece 19 landmark detection
+deepfashion dataset 2 - landmark detection for dataset of sort of one-piece
+
 add the crop the image alongs to bbox
+
+add some variation of transform
+
+model: resnet18 or conventional CNN
 
 @author: jekim
 """
@@ -251,16 +256,41 @@ class ToTensor(object):
                 'landmarks': torch.from_numpy(landmarks)}
     
 class Network(nn.Module):
-    def __init__(self,num_classes=14*2):
+    def __init__(self,num_classes=7*2):
         super().__init__()
         self.model_name='resnet18'
         self.model=models.resnet18(pretrained=True)
         # self.model.conv1=nn.Conv2d(1, 64, kernel_size=7, stride=2, padding=3, bias=False) #in case of the number of input channel = 1 (gray scale)
+        for param in self.model.parameters():
+            param.requires_grad = False
         self.model.fc=nn.Linear(self.model.fc.in_features, num_classes)
         
     def forward(self, x):
         x=self.model(x)
         return x
+    
+    def cal_loss(self, sample, output):
+        batch_size, _, _, _ = sample['image'].size()
+
+        lm_size = int(output['lm_pos_map'].shape[2])
+        if hasattr(const, 'LM_TRAIN_USE') and const.LM_TRAIN_USE == 'in_pic':
+            mask = sample['landmark_in_pic'].reshape(batch_size * 8, -1)
+        else:
+            mask = sample['landmark_vis'].reshape(batch_size * 8, -1)
+        mask = torch.cat([mask] * lm_size * lm_size, dim=1).float()
+        map_sample = sample['landmark_map%d' % lm_size].reshape(batch_size * 8, -1)
+        map_output = output['lm_pos_map'].reshape(batch_size * 8, -1)
+        lm_pos_loss = torch.pow(mask * (map_output - map_sample), 2).mean()
+
+        all_loss = \
+            const.WEIGHT_LOSS_LM_POS * lm_pos_loss
+        loss = {
+            'all': all_loss,
+            'lm_pos_loss': lm_pos_loss.item(),
+            'weighted_lm_pos_loss': const.WEIGHT_LOSS_LM_POS * lm_pos_loss.item(),
+        }
+
+        return loss
 
 ''' 6. Convolutional Neural Network (CNN) 모델 설계하기 '''
 
@@ -318,10 +348,10 @@ def print_overwrite(step, total_step, loss, operation):
 if __name__ == "__main__":
         
     
-    train_img_dir = "/home/jekim/workspace/Deepfashion2_Training/Deepfashion2_Training/dataset2_op_small_nooclu/train/image"
-    train_json_path = "/home/jekim/workspace/Deepfashion2_Training/Deepfashion2_Training/dataset2_op_small_nooclu/train/annos"
-    valid_img_dir = "/home/jekim/workspace/Deepfashion2_Training/Deepfashion2_Training/dataset2_op_small_nooclu/validation/image"
-    valid_json_path = "/home/jekim/workspace/Deepfashion2_Training/Deepfashion2_Training/dataset2_op_small_nooclu/validation/annos"
+    train_img_dir = "/home/jekim/workspace/Deepfashion2_Training/Deepfashion2_Training/dataset2_op/train/image"
+    train_json_path = "/home/jekim/workspace/Deepfashion2_Training/Deepfashion2_Training/dataset2_op/train/annos"
+    valid_img_dir = "/home/jekim/workspace/Deepfashion2_Training/Deepfashion2_Training/dataset2_op/validation/image"
+    valid_json_path = "/home/jekim/workspace/Deepfashion2_Training/Deepfashion2_Training/dataset2_op/validation/annos"
     
     data_transform = transforms.Compose([
         ClothCrop(),
@@ -353,13 +383,16 @@ if __name__ == "__main__":
     # network = CNN()
     network.to(device)
     
-    criterion = nn.MSELoss()
+    # criterion = nn.MSELoss()
+    criterion = network.cal_loss()
     # criterion = nn.CrossEntropyLoss()
-    optimizer = optim.Adam(network.parameters(), lr=0.0001)
+    # optimizer = optim.Adam(network.parameters(), lr=0.0001)
+    optimizer = optim.Adam(network.model.fc.parameters(),lr=0.0001) # turning the last fc layer 
     # optimizer = optim.SGD(network.parameters(), lr=0.001, momentum=0.9)
     
     loss_min = np.inf
     num_epochs = 25
+    num_class = 7
     
     start_time = time.time()
     
@@ -380,7 +413,9 @@ if __name__ == "__main__":
             images = images.float().cuda()
             # images = images.cuda()
 
-            landmarks = landmarks.view(landmarks.size(0),-1).float().cuda() 
+            landmarks = landmarks.view(landmarks.size(0),-1).float().cuda()
+            # zitter= (np.random.rand(batch_size,num_class*2)-0.5)*(10/286) # make zitter with 5pixel
+            # landmarks = landmarks+torch.Tensor(zitter).cuda()
             # landmarks = landmarks.view(landmarks.size(0),-1).cuda() 
         
             predictions = network(images)
@@ -398,7 +433,7 @@ if __name__ == "__main__":
 
             # plt.imshow(display_img.squeeze())
             # plt.show()
-            ''''''
+            # ''''''
             
             # clear all the gradients before calculating them
             optimizer.zero_grad()
